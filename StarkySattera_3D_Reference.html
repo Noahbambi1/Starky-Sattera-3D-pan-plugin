@@ -141,7 +141,13 @@
       <option value="spiral">Spiral (in &amp; out)</option>
       <option value="figure8">Figure-8</option>
     </select>
-    <div class="ctl"><label>Speed <b id="motSpeedVal">1.00×</b></label><input type="range" id="motSpeed" min="0.1" max="3" step="0.05" value="1"></div>
+    <div class="ctl"><label>Range <b id="motRangeVal">2.5 m</b></label><input type="range" id="motRange" min="0.3" max="9" step="0.05" value="2.5"></div>
+    <div class="ctl"><label>Speed <b id="motSpeedVal">1.00×</b></label><input type="range" id="motSpeed" min="0" max="1" step="0.001" value="0.394"></div>
+    <div class="row" style="gap:6px;align-items:center;margin-bottom:6px">
+      <label class="row" style="gap:5px"><input type="checkbox" id="motSync"> sync</label>
+      <input type="number" id="motBpm" value="120" min="20" max="300" style="width:52px;padding:4px;font-size:11px">
+      <select id="motDiv" style="flex:1;font-size:11px"><option value="0.25">1/16</option><option value="0.5">1/8</option><option value="1">1/4</option><option value="2">1/2</option><option value="4" selected>1 bar</option><option value="8">2 bars</option><option value="16">4 bars</option></select>
+    </div>
     <div class="row" style="gap:6px"><button id="recBtn" style="flex:1">● Record path</button><button id="loopBtn" style="flex:1">▶ Play loop</button></div>
     <div class="mini" id="motStatus" style="margin-top:5px"></div>
   </div>
@@ -532,7 +538,7 @@ function addSource(type,buffer,name){
   const isP=PATTERN_INT[type]!=null;
   const s={id:nextId++,name:name||cap(type),color,type,kind:isP?"pattern":"loop",buffer:buffer||null,oneshot:null,
     x:(Math.random()*3-1.5),y:0,z:-(2+Math.random()*1.5),volDb:0,muted:false,reverbSend:1,
-    mot:{type:"none",speed:1,phase:0,rad:2.5,rec:[],recording:false,recT:0,dur:0}};
+    mot:{type:"none",speed:1,phase:0,rad:2.5,rec:[],recording:false,recT:0,dur:0,synced:false,bpm:120,div:4}};
   if(isP&&ctx)s.oneshot=oneShot(type);
   sources.push(s); selId=s.id;
   if(haveGL) makeSourceMesh(s);
@@ -574,10 +580,22 @@ function applyPreset(name){
 function syncRoomUI(){ setV('roomSize',roomEdge);setT('roomVal',roomEdge.toFixed(1)+" m"); setV('decay',revDecay);setT('decayVal',revDecay.toFixed(1)+" s");
   setV('damp',Math.round(damping*100));setT('dampVal',Math.round(damping*100)+"%"); setV('wet',Math.round(wetAmt*100));setT('wetVal',Math.round(wetAmt*100)+"%");
   ['posx','posy','posz'].forEach(id=>{const e=document.getElementById(id);e.min=-roomEdge/2;e.max=roomEdge/2;});
-  const pd=document.getElementById('posdist'); if(pd)pd.max=(roomEdge*0.87).toFixed(2); }
+  const pd=document.getElementById('posdist'); if(pd)pd.max=(roomEdge*0.87).toFixed(2);
+  const mr=document.getElementById('motRange'); if(mr)mr.max=(roomEdge/2).toFixed(2); }
 
 /* ===== motion engine: preset paths + recorder/looper ===== */
 const MOTION_RATE={orbit:0.9,vorbit:0.9,fullorbit:0.7,bounce:3.2,pingpong:1.6,flythrough:0.6,spiral:0.8,figure8:1.0,helix:0.8};
+function motionAxes(t){ switch(t){
+  case "orbit": case "spiral": case "figure8": return [1,0,1];   // X,Z move ; Y free
+  case "vorbit": return [0,1,1];                                  // Y,Z move ; X free
+  case "pingpong": return [1,0,0];                                // X moves ; Y,Z free
+  case "flythrough": return [0,0,1];                              // Z moves ; X,Y free
+  case "bounce": return [0,1,0];                                  // Y moves ; X,Z free
+  case "fullorbit": case "helix": return [1,1,1];
+  } return [1,1,1]; }
+function sliderToSpeed(v){ return 0.05*Math.pow(2000, Math.max(0,Math.min(1,v))); }   // 0.05x .. 100x
+function speedToSlider(sp){ return Math.max(0,Math.min(1, Math.log(Math.max(0.05,sp)/0.05)/Math.log(2000))); }
+function fmtSpeed(sp){ return sp<10?sp.toFixed(2)+"×":sp.toFixed(0)+"×"; }
 function motionPos(type,p,r){ const TAU=Math.PI*2;
   switch(type){
     case "orbit":    return [r*Math.sin(p),0,-r*Math.cos(p)];
@@ -600,14 +618,26 @@ function tickMotion(dt){ const R=roomEdge/2;
     if(action==="move"&&dragS===s) continue;
     if(m.type==="none") continue;
     let pos=null;
-    if(m.type==="loop"){ if(m.dur<=0||m.rec.length<2)continue; m.phase+=dt*m.speed; pos=loopSample(m,((m.phase%m.dur)+m.dur)%m.dur); }
-    else { m.phase+=dt*m.speed*(MOTION_RATE[m.type]||1); pos=motionPos(m.type,m.phase,m.rad); }
-    if(pos){ s.x=Math.max(-R,Math.min(R,pos[0])); s.y=Math.max(-R,Math.min(R,pos[1])); s.z=Math.max(-R,Math.min(R,pos[2])); if(s.id===selId)syncSel(); }
+    if(m.type==="loop"){ if(m.dur<=0||m.rec.length<2)continue;
+      m.phase += m.synced ? (dt*m.dur/Math.max(0.05,m.div*60/m.bpm)) : (dt*m.speed);
+      pos=loopSample(m,((m.phase%m.dur)+m.dur)%m.dur);
+      s.x=Math.max(-R,Math.min(R,pos[0])); s.y=Math.max(-R,Math.min(R,pos[1])); s.z=Math.max(-R,Math.min(R,pos[2])); if(s.id===selId)syncSel(); continue; }
+    const adv = m.synced ? (dt*2*Math.PI/Math.max(0.05, m.div*60/m.bpm)) : (dt*m.speed*(MOTION_RATE[m.type]||1));
+    m.phase += adv;
+    pos=motionPos(m.type,m.phase,m.rad);
+    if(pos){ const ax=motionAxes(m.type);
+      if(ax[0]) s.x=Math.max(-R,Math.min(R,pos[0]));
+      if(ax[1]) s.y=Math.max(-R,Math.min(R,pos[1]));
+      if(ax[2]) s.z=Math.max(-R,Math.min(R,pos[2]));
+      if(s.id===selId)syncSel(); }
   } }
 function updateMotStatus(){ const s=sel(),el=document.getElementById('motStatus'); if(!el)return; if(!s){el.textContent="";return;}
   const m=s.mot;
   document.getElementById('motType').value=(m.type==="loop"||m.type==="record-arm")?"none":m.type;
-  document.getElementById('motSpeed').value=m.speed; setT('motSpeedVal',m.speed.toFixed(2)+"×");
+  document.getElementById('motRange').value=m.rad; setT('motRangeVal',(m.rad||0).toFixed(2)+" m");
+  document.getElementById('motSpeed').value=speedToSlider(m.speed); setT('motSpeedVal',fmtSpeed(m.speed));
+  document.getElementById('motSync').checked=!!m.synced;
+  document.getElementById('motBpm').value=m.bpm; document.getElementById('motDiv').value=String(m.div);
   document.getElementById('recBtn').textContent=m.recording?"■ Stop recording":"● Record path";
   document.getElementById('loopBtn').textContent=(m.type==="loop")?"⏸ Stop loop":"▶ Play loop";
   el.textContent=m.recording?"recording… move the orb to draw a path":m.type==="loop"?("looping recorded path · "+m.dur.toFixed(1)+"s"):m.rec.length>1?("path recorded · "+m.dur.toFixed(1)+"s"):""; }
@@ -626,7 +656,7 @@ function toggleRec(){ ensureCtx(); ctx.resume();
   else { recording=false; $('recwavBtn').textContent="● Rec WAV"; $('recwavBtn').style.color=""; if(recN>0)dlBlob(exportWAV(),"starky_bounce.wav"); } }
 function saveScene(){ const data={v:1,room:{roomEdge,revDecay,damping,wetAmt},head:headA,mode,master:masterDb,
   sources:sources.filter(s=>s.type!=="file").map(s=>({name:s.name,type:s.type,color:s.color,x:s.x,y:s.y,z:s.z,volDb:s.volDb,muted:s.muted,reverbSend:s.reverbSend,
-    mot:{type:s.mot.type,speed:s.mot.speed,rad:s.mot.rad,rec:s.mot.rec,dur:s.mot.dur}}))};
+    mot:{type:s.mot.type,speed:s.mot.speed,rad:s.mot.rad,rec:s.mot.rec,dur:s.mot.dur,synced:s.mot.synced,bpm:s.mot.bpm,div:s.mot.div}}))};
   dlBlob(new Blob([JSON.stringify(data)],{type:"application/json"}),"starky_scene.json"); }
 function loadScene(data){ sources.slice().forEach(s=>{stopGraph(s);removeMesh(s);}); sources.length=0; nextId=1; selId=null;
   if(data.room){roomEdge=data.room.roomEdge;revDecay=data.room.revDecay;damping=data.room.damping;wetAmt=data.room.wetAmt;}
@@ -636,7 +666,7 @@ function loadScene(data){ sources.slice().forEach(s=>{stopGraph(s);removeMesh(s)
   (data.sources||[]).forEach(d=>{ const isP=PATTERN_INT[d.type]!=null;
     const s={id:nextId++,name:d.name,color:(d.color!=null?d.color:PALETTE[(nextId-1)%PALETTE.length]),type:d.type,kind:isP?"pattern":"loop",buffer:null,oneshot:null,
       x:d.x,y:d.y,z:d.z,volDb:d.volDb||0,muted:!!d.muted,reverbSend:(d.reverbSend!=null?d.reverbSend:1),
-      mot:{type:(d.mot&&d.mot.type)||"none",speed:(d.mot&&d.mot.speed)||1,phase:0,rad:(d.mot&&d.mot.rad)||2.5,rec:(d.mot&&d.mot.rec)||[],recording:false,recT:0,dur:(d.mot&&d.mot.dur)||0}};
+      mot:{type:(d.mot&&d.mot.type)||"none",speed:(d.mot&&d.mot.speed)||1,phase:0,rad:(d.mot&&d.mot.rad)||2.5,rec:(d.mot&&d.mot.rec)||[],recording:false,recT:0,dur:(d.mot&&d.mot.dur)||0,synced:!!(d.mot&&d.mot.synced),bpm:(d.mot&&d.mot.bpm)||120,div:(d.mot&&d.mot.div)||4}};
     if(isP&&ctx)s.oneshot=oneShot(s.type); sources.push(s); if(haveGL)makeSourceMesh(s); if(running)buildGraph(s); });
   selId=sources[0]?sources[0].id:null; applyMode();
   document.querySelectorAll('#modeSeg button').forEach(b=>b.classList.toggle('on',b.dataset.mode===mode));
@@ -666,8 +696,12 @@ $('wet').oninput=e=>{wetAmt=+e.target.value/100;setT('wetVal',e.target.value+"%"
 $('headA').oninput=e=>{headA=+e.target.value/100;setT('haVal',(+e.target.value).toFixed(2)+" cm");};
 $('sofaIn').onchange=async e=>{const f=e.target.files[0];if(!f)return;ensureCtx();document.getElementById('hrtfSrc').textContent="loading…";try{await loadSOFA(f);}catch(err){document.getElementById('hrtfSrc').textContent="load failed — using model";hrirSource="model";console.error(err);}};
 $('useModel').onclick=()=>{hrirSource="model";document.getElementById('hrtfSrc').textContent="structural model";};
-$('motType').onchange=e=>{const s=sel();if(!s)return;s.mot.type=e.target.value;s.mot.phase=0;if(e.target.value!=="none")s.mot.rad=Math.max(1.5,Math.min(roomEdge*0.42,Math.hypot(s.x,s.y,s.z)||2.5));updateMotStatus();};
-$('motSpeed').oninput=e=>{const s=sel();if(!s)return;s.mot.speed=+e.target.value;setT('motSpeedVal',(+e.target.value).toFixed(2)+"×");};
+$('motType').onchange=e=>{const s=sel();if(!s)return;s.mot.type=e.target.value;s.mot.phase=0;if(e.target.value!=="none")s.mot.rad=Math.max(1.5,Math.min(roomEdge*0.45,Math.hypot(s.x,s.y,s.z)||2.5));updateMotStatus();};
+$('motRange').oninput=e=>{const s=sel();if(!s)return;s.mot.rad=+e.target.value;setT('motRangeVal',(+e.target.value).toFixed(2)+" m");};
+$('motSpeed').oninput=e=>{const s=sel();if(!s)return;s.mot.speed=sliderToSpeed(+e.target.value);setT('motSpeedVal',fmtSpeed(s.mot.speed));};
+$('motSync').onchange=e=>{const s=sel();if(!s)return;s.mot.synced=e.target.checked;};
+$('motBpm').oninput=e=>{const s=sel();if(!s)return;s.mot.bpm=Math.max(20,+e.target.value||120);};
+$('motDiv').onchange=e=>{const s=sel();if(!s)return;s.mot.div=+e.target.value;};
 $('recBtn').onclick=()=>{const s=sel();if(!s)return;if(s.mot.recording)stopRec(s);else startRec(s);updateMotStatus();};
 $('loopBtn').onclick=()=>{const s=sel();if(!s)return;if(s.mot.rec.length>1){s.mot.type=(s.mot.type==="loop")?"none":"loop";s.mot.phase=0;}updateMotStatus();};
 $('revSend').oninput=e=>{const s=sel();if(!s)return;s.reverbSend=+e.target.value/100;setT('revSendVal',e.target.value+"%");};
