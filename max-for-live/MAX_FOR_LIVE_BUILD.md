@@ -72,4 +72,44 @@ The preset shapes from the app (orbit, vertical orbit, full orbit, helix, bounce
 ## Notes
 - This is a **single-source insert**: it spatializes the track it's on. Use one instance per source for a multi-source scene (each with its own az/el/dist).
 - For **measured HRTF** (SOFA) in Max, the structural model here can be swapped for HRIR convolution using `[buffir~]` (load left/right impulse responses into `[buffer~]`) or partitioned convolution — a larger build; the structural model is a great, low-CPU default.
-- The DSP in `binaural.genexpr` is byte-for-byte the same model verified in the reference app.
+- The DSP in `binaural.genexpr` is the same model verified in the reference app.
+
+---
+
+## Motion, in-head, and reverb (v2 additions)
+
+### gen~ now has 3 outlets + a `wet` param
+`binaural.genexpr` (v2) outputs **out1 = L, out2 = R, out3 = reverb send (mono)**, and adds a `wet` Param. Re-paste it into the codebox and give the gen~ **3** `out` objects.
+
+- **In-head collapse** is built in: as `dist` → 0 the source crossfades to a dry equal-power pan (mono inside the head) and the reverb send fades out — exactly like the app. Nothing else to wire.
+- **Distance** drives both the inverse-distance gain and the reverb send automatically.
+
+### Reverb (stock MSP send/return)
+Route `gen~` **out3** into a simple Schroeder reverb and add the return back to out1/out2:
+```
+gen~ out3 ─► [comb~ 1100 0.84] ─┐
+          ├► [comb~ 1300 0.82] ─┤
+          ├► [comb~ 1500 0.80] ─┼► [+~] ─► [allpass~ 225 0.7] ─► [allpass~ 556 0.7] ─► [*~ return]
+          └► [comb~ 1700 0.78] ─┘                                                        │
+out1 ◄── [+~] ◄───────────────────────────────────────────────────────────────────────┘
+out2 ◄── [+~] ◄── (same return)
+```
+`[comb~]` and `[allpass~]` are stock MSP. Scale comb feedback with a **Decay** dial and add a **Reverb mix** dial on the `[*~ return]`. (For a fancier room, swap in `gigaverb~`/a gen~ FDN.)
+
+### Motion engine (`motion.js`)
+Drop `[js motion.js]` (or `[v8 motion.js]`) in the patch and drive it with `[metro 25] → [js]` (bang each tick). It outputs **azimuth / elevation / distance** — wire those to the three dials (or straight to `gen~` / `hrirloader`).
+
+Controls:
+- `[umenu]` of motion names → `settype $1` → motion.js (orbit, vorbit, fullorbit, helix, bounce, pingpong, flythrough, spiral, figure8, none).
+- **Speed** dial → `setspeed $1`. **Radius** dial → `setradius $1`. A toggle on the `[metro]` starts/stops motion.
+
+The paths are the exact `motionPos` formulas from the app, converted to az/el/dist — verified to match (orbit front→right, fly-through passes below and through, etc.).
+
+---
+
+## Migrating to your Ableton machine
+1. Copy the whole project folder over (or `git clone` once you've pushed it).
+2. Install Max deps for the SOFA path: `pip install h5py numpy`, then run `sofa2max.py` on your `.sofa` there.
+3. Put `binaural.genexpr`, `motion.js`, `hrirloader.js`, and the converted HRIR assets in the device folder (or Live's search path).
+4. Build per this guide (or open the `.maxpat`), then **Save As → Max Audio Effect**. Drop on a track and play.
+

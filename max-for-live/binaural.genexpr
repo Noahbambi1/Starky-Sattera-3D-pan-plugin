@@ -1,62 +1,69 @@
 // ===========================================================================
-// Starky Sattera — Binaural Panner  (gen~ codebox / GenExpr)
-// Mono in -> binaural stereo out.  Paste this into a [codebox] inside a gen~.
+// Starky Sattera — Binaural Panner v2  (gen~ codebox / GenExpr)
+// Mono in -> binaural stereo out, with in-head collapse + a reverb send.
 //
 //   in1   = mono source signal
-//   out1  = Left ear      out2 = Right ear
+//   out1  = Left ear      out2 = Right ear      out3 = reverb send (mono)
 //
-// Model (matches the HTML reference engine):
-//   ITD   : Woodworth spherical-head delay, elevation-scaled (fractional delay)
-//   ILD   : Brown-Duda first-order head-shadow shelf per ear (bilinear transform)
-//   Dist  : inverse-distance gain
+//   ITD     : Woodworth spherical-head delay (fractional), elevation-scaled
+//   ILD     : Brown-Duda head-shadow shelf per ear (bilinear)
+//   Dist    : inverse-distance gain
+//   In-head : as dist -> 0 the source collapses to a dry equal-power pan (mono
+//             in your head); the reverb send fades out so it isn't externalised
+//   Reverb  : out3 is a distance-driven mono send; route it to a reverb and add
+//             the return back into out1/out2 (see MAX_FOR_LIVE_BUILD.md)
 // ===========================================================================
 
 Param az(0);          // azimuth degrees   (-180..180, - = left, + = right)
 Param el(0);          // elevation degrees (-90..90,  - = down, + = up)
-Param dist(2);        // distance metres   (0.2..15)
-Param headcm(8.75);   // head radius cm    (6..11)
+Param dist(2);        // distance metres   (0..15 ; 0 = in your head)
+Param headcm(8.75);   // head radius cm
+Param wet(0.4);       // global reverb-send amount (0..1)
 
-History xL(0), yL(0);  // left  shadow-filter state (x[n-1], y[n-1])
-History xR(0), yR(0);  // right shadow-filter state
+History xL(0), yL(0);
+History xR(0), yR(0);
 
-cc   = 343;                         // speed of sound m/s
-a    = headcm * 0.01;               // head radius m
-azr  = az * 0.01745329;             // -> radians
+cc   = 343;
+a    = headcm * 0.01;
+azr  = az * 0.01745329;
 elr  = el * 0.01745329;
 
-// --- ITD (Woodworth), folded for rear hemisphere, elevation-scaled ----------
+// --- ITD ---
 ath  = abs(azr);
 thE  = (ath <= 1.5707963) ? ath : (3.1415927 - ath);
-itd  = (a / cc) * (thE + sin(thE)) * cos(elr);   // seconds, >= 0
-dsmp = itd * samplerate;                         // delay in samples
-
-rl   = (azr > 0);                                // right ear leads when source is on the right
+itd  = (a / cc) * (thE + sin(thE)) * cos(elr);
+dsmp = itd * samplerate;
+rl   = (azr > 0);
 dlL  = rl ? dsmp : 0;
 dlR  = rl ? 0 : dsmp;
-
-sL   = delay(in1, dlL, 512);                     // fractional (interpolated) delay
+sL   = delay(in1, dlL, 512);
 sR   = delay(in1, dlR, 512);
 
-// --- head-shadow shelf per ear (Brown-Duda, bilinear) -----------------------
-cosI = sin(azr) * cos(elr);          // cos(incidence) to the RIGHT ear
-alL  = clamp(1 - cosI, 0.1, 1.9);    // alpha for left  ear
-alR  = clamp(1 + cosI, 0.1, 1.9);    // alpha for right ear
+// --- head-shadow shelf ---
+cosI = sin(azr) * cos(elr);
+alL  = clamp(1 - cosI, 0.1, 1.9);
+alR  = clamp(1 + cosI, 0.1, 1.9);
+g    = cc / a;  K = 2 * samplerate;  den = g + K;
+b0L = (g + alL*K)/den; b1L = (g - alL*K)/den; a1L = (g - K)/den;
+b0R = (g + alR*K)/den; b1R = (g - alR*K)/den; a1R = (g - K)/den;
+oL  = b0L*sL + b1L*xL - a1L*yL;  xL = sL;  yL = oL;
+oR  = b0R*sR + b1R*xR - a1R*yR;  xR = sR;  yR = oR;
 
-g    = cc / a;                       // w0 = c/a
-K    = 2 * samplerate;
-den  = g + K;
-
-b0L = (g + alL*K)/den;  b1L = (g - alL*K)/den;  a1L = (g - K)/den;
-b0R = (g + alR*K)/den;  b1R = (g - alR*K)/den;  a1R = (g - K)/den;
-
-oL  = b0L*sL + b1L*xL - a1L*yL;      // y[n] = b0 x + b1 x[-1] - a1 y[-1]
-xL  = sL;  yL = oL;
-
-oR  = b0R*sR + b1R*xR - a1R*yR;
-xR  = sR;  yR = oR;
-
-// --- distance gain ----------------------------------------------------------
 dg  = min(1, 1.5 / max(0.4, dist));
 
-out1 = oL * dg;
-out2 = oR * dg;
+// --- in-head collapse (dry equal-power pan as dist -> 0) ---
+ih   = clamp(1 - dist/0.7, 0, 1);
+panr = clamp(sin(azr), -1, 1);
+ang  = (panr + 1) * 0.7853982;        // 0..pi/2
+gLm  = cos(ang);
+gRm  = sin(ang);
+outL = oL*dg*(1 - ih) + in1*gLm*ih;
+outR = oR*dg*(1 - ih) + in1*gRm*ih;
+
+// --- reverb send: grows with distance, killed in-head ---
+baseWet = min(0.85, 0.06 + dist*0.07);
+wsend   = baseWet * (1 - ih) * wet;
+
+out1 = outL;
+out2 = outR;
+out3 = (oL + oR) * 0.5 * dg * wsend;
