@@ -73,6 +73,7 @@
   <div class="tagline">3D Binaural Spatial Studio · <span class="pill" id="status">stopped</span></div>
   <div class="row"><button id="startBtn" class="primary" style="flex:1">▶ Start audio</button><button id="panicBtn">Stop</button></div>
   <div class="ctl"><label>Master <b id="masterVal">−6 dB</b></label><input type="range" id="masterVol" min="-40" max="0" step="0.5" value="-6"></div>
+      <div class="row" style="margin-top:4px"><button id="recwavBtn" style="flex:1">● Rec WAV (live bounce)</button></div>
 
   <h2>Listening mode</h2>
   <div class="seg" id="modeSeg">
@@ -105,6 +106,10 @@
     <button data-preset="studio">Studio</button>
     <button data-preset="cathedral">Cathedral</button>
   </div>
+
+  <h2>Scene</h2>
+  <div class="row"><button id="saveBtn" style="flex:1">Save scene</button>
+    <label style="font-size:10.5px;flex:1">load <input type="file" id="sceneIn" accept=".json" style="font-size:10px;width:100%"></label></div>
 </div>
 
 <!-- RIGHT PANEL -->
@@ -121,6 +126,7 @@
     </div>
     <div class="ctl"><label>Front ◄ ► Back <b id="zVal">0</b></label><input type="range" id="posz" min="-8" max="8" step="0.02" value="-2"></div>
     <div class="ctl"><label>Distance from head <b id="distSliderVal">2.0 m</b></label><input type="range" id="posdist" min="0" max="8" step="0.05" value="2"></div>
+    <div class="ctl"><label>Reverb send <b id="revSendVal">100%</b></label><input type="range" id="revSend" min="0" max="150" step="1" value="100"></div>
     <div class="divider"></div>
     <h2 style="margin-bottom:6px">Motion</h2>
     <select id="motType" style="width:100%">
@@ -181,6 +187,7 @@ const PALETTE=[0x5ad1c4,0xf0a85a,0xc47af0,0x7af08a,0xf07a9e,0x7aa8f0,0xf0e67a,0x
 const hex=c=>"#"+c.toString(16).padStart(6,"0");
 
 let ctx=null,master=null,limiter=null,convolver=null,reverbReturn=null,running=false;
+let recSP=null,recording=false,recL=[],recR=[],recN=0;
 let mode="hrtf",headA=0.0875,roomEdge=7,revDecay=1.4,damping=0.55,wetAmt=0.28,masterDb=-6;
 let selId=null,nextId=1;
 const sources=[];
@@ -192,7 +199,10 @@ function ensureCtx(){
   master=ctx.createGain(); master.gain.value=dB(masterDb);
   limiter=ctx.createDynamicsCompressor();
   limiter.threshold.value=-6; limiter.knee.value=6; limiter.ratio.value=12; limiter.attack.value=0.003; limiter.release.value=0.25;
-  master.connect(limiter); limiter.connect(ctx.destination);
+  master.connect(limiter);
+  recSP=ctx.createScriptProcessor(4096,2,2);   // passthrough + capture for WAV bounce
+  recSP.onaudioprocess=e=>{const iL=e.inputBuffer.getChannelData(0),iR=e.inputBuffer.getChannelData(1),oL=e.outputBuffer.getChannelData(0),oR=e.outputBuffer.getChannelData(1);oL.set(iL);oR.set(iR);if(recording){recL.push(new Float32Array(iL));recR.push(new Float32Array(iR));recN+=iL.length;}};
+  limiter.connect(recSP); recSP.connect(ctx.destination);
   convolver=ctx.createConvolver();
   reverbReturn=ctx.createGain(); reverbReturn.gain.value=1;
   convolver.connect(reverbReturn); reverbReturn.connect(master);
@@ -357,7 +367,7 @@ function updateAudio(){
     if(azL>=0){s.fR.frequency.setTargetAtTime(near,now,0.05);s.fL.frequency.setTargetAtTime(fc,now,0.05);} else {s.fL.frequency.setTargetAtTime(near,now,0.05);s.fR.frequency.setTargetAtTime(fc,now,0.05);}
     s.sp.pan.value=Math.max(-1,Math.min(1,Math.sin(azL)));
     s.airLP.frequency.setTargetAtTime(Math.max(1200,20000*Math.exp(-dist*0.16)),now,0.08);
-    const wet=Math.min(0.85,(0.06+dist*0.07))*wetAmt*2.4; s.wetSend.gain.setTargetAtTime(wet,now,0.08);
+    const wet=Math.min(0.85,(0.06+dist*0.07))*wetAmt*2.4*(s.reverbSend!=null?s.reverbSend:1); s.wetSend.gain.setTargetAtTime(wet,now,0.08);
     const ev=Math.atan2(s.y,Math.max(0.01,Math.hypot(s.x,s.z))); s.elev.gain.setTargetAtTime(Math.max(-6,Math.min(6,ev/(Math.PI/2)*5)),now,0.06);
     // in-head crossfade: 0 outside, ->1 at the head centre (mono, no reverb)
     const T=0.7, ih=Math.max(0,Math.min(1,1-dist/T));
@@ -521,7 +531,7 @@ function addSource(type,buffer,name){
   const color=PALETTE[(nextId-1)%PALETTE.length];
   const isP=PATTERN_INT[type]!=null;
   const s={id:nextId++,name:name||cap(type),color,type,kind:isP?"pattern":"loop",buffer:buffer||null,oneshot:null,
-    x:(Math.random()*3-1.5),y:0,z:-(2+Math.random()*1.5),volDb:0,muted:false,
+    x:(Math.random()*3-1.5),y:0,z:-(2+Math.random()*1.5),volDb:0,muted:false,reverbSend:1,
     mot:{type:"none",speed:1,phase:0,rad:2.5,rec:[],recording:false,recT:0,dur:0}};
   if(isP&&ctx)s.oneshot=oneShot(type);
   sources.push(s); selId=s.id;
@@ -542,6 +552,7 @@ function syncSel(){ const s=sel(); if(!s)return;
   setV('vol',s.volDb); setT('volVal',s.volDb+" dB");
   setV('posx',s.x); setT('xVal',s.x.toFixed(1)); setV('posy',s.y); setT('yVal',s.y.toFixed(1)); setV('posz',s.z); setT('zVal',s.z.toFixed(1));
   const d=Math.hypot(s.x,s.y,s.z); setV('posdist',d); setT('distSliderVal', d<0.05?"in head (mono)":(d<0.7?d.toFixed(2)+" m · in-head":d.toFixed(2)+" m"));
+  const rs=Math.round((s.reverbSend!=null?s.reverbSend:1)*100); setV('revSend',rs); setT('revSendVal',rs+"%");
   document.getElementById('muteBtn').textContent=s.muted?"unmute":"mute"; updateMotStatus(); }
 function setV(id,v){const el=document.getElementById(id);if(el)el.value=v;}
 function sel(){return sources.find(x=>x.id===selId);}
@@ -601,6 +612,36 @@ function updateMotStatus(){ const s=sel(),el=document.getElementById('motStatus'
   document.getElementById('loopBtn').textContent=(m.type==="loop")?"⏸ Stop loop":"▶ Play loop";
   el.textContent=m.recording?"recording… move the orb to draw a path":m.type==="loop"?("looping recorded path · "+m.dur.toFixed(1)+"s"):m.rec.length>1?("path recorded · "+m.dur.toFixed(1)+"s"):""; }
 
+/* ===== bounce-to-WAV + scene save/load ===== */
+function flattenF(chunks,total){ const o=new Float32Array(total); let p=0; for(const c of chunks){o.set(c,p);p+=c.length;} return o; }
+function exportWAV(){ const len=recN, buf=new ArrayBuffer(44+len*4), v=new DataView(buf); let p=0;
+  const ws=s=>{for(let i=0;i<s.length;i++)v.setUint8(p++,s.charCodeAt(i));}, u32=n=>{v.setUint32(p,n,true);p+=4;}, u16=n=>{v.setUint16(p,n,true);p+=2;};
+  ws("RIFF");u32(36+len*4);ws("WAVE");ws("fmt ");u32(16);u16(1);u16(2);u32(ctx.sampleRate);u32(ctx.sampleRate*4);u16(4);u16(16);ws("data");u32(len*4);
+  const L=flattenF(recL,len),R=flattenF(recR,len);
+  for(let i=0;i<len;i++){ let l=Math.max(-1,Math.min(1,L[i])),r=Math.max(-1,Math.min(1,R[i])); v.setInt16(p,l<0?l*32768:l*32767,true);p+=2; v.setInt16(p,r<0?r*32768:r*32767,true);p+=2; }
+  return new Blob([buf],{type:"audio/wav"}); }
+function dlBlob(blob,name){ const u=URL.createObjectURL(blob),a=document.createElement('a'); a.href=u; a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(u),1500); }
+function toggleRec(){ ensureCtx(); ctx.resume();
+  if(!recording){ recL=[];recR=[];recN=0;recording=true; $('recwavBtn').textContent="■ Stop & save WAV"; $('recwavBtn').style.color="var(--warn)"; }
+  else { recording=false; $('recwavBtn').textContent="● Rec WAV"; $('recwavBtn').style.color=""; if(recN>0)dlBlob(exportWAV(),"starky_bounce.wav"); } }
+function saveScene(){ const data={v:1,room:{roomEdge,revDecay,damping,wetAmt},head:headA,mode,master:masterDb,
+  sources:sources.filter(s=>s.type!=="file").map(s=>({name:s.name,type:s.type,color:s.color,x:s.x,y:s.y,z:s.z,volDb:s.volDb,muted:s.muted,reverbSend:s.reverbSend,
+    mot:{type:s.mot.type,speed:s.mot.speed,rad:s.mot.rad,rec:s.mot.rec,dur:s.mot.dur}}))};
+  dlBlob(new Blob([JSON.stringify(data)],{type:"application/json"}),"starky_scene.json"); }
+function loadScene(data){ sources.slice().forEach(s=>{stopGraph(s);removeMesh(s);}); sources.length=0; nextId=1; selId=null;
+  if(data.room){roomEdge=data.room.roomEdge;revDecay=data.room.revDecay;damping=data.room.damping;wetAmt=data.room.wetAmt;}
+  if(data.head!=null)headA=data.head; if(data.mode)mode=data.mode; if(data.master!=null){masterDb=data.master; if(master)master.gain.value=dB(masterDb);}
+  syncRoomUI(); setV('masterVol',masterDb); setT('masterVal',masterDb+" dB"); setV('headA',headA*100); setT('haVal',(headA*100).toFixed(2)+" cm");
+  if(haveGL)buildRoom(); if(ctx)buildIR();
+  (data.sources||[]).forEach(d=>{ const isP=PATTERN_INT[d.type]!=null;
+    const s={id:nextId++,name:d.name,color:(d.color!=null?d.color:PALETTE[(nextId-1)%PALETTE.length]),type:d.type,kind:isP?"pattern":"loop",buffer:null,oneshot:null,
+      x:d.x,y:d.y,z:d.z,volDb:d.volDb||0,muted:!!d.muted,reverbSend:(d.reverbSend!=null?d.reverbSend:1),
+      mot:{type:(d.mot&&d.mot.type)||"none",speed:(d.mot&&d.mot.speed)||1,phase:0,rad:(d.mot&&d.mot.rad)||2.5,rec:(d.mot&&d.mot.rec)||[],recording:false,recT:0,dur:(d.mot&&d.mot.dur)||0}};
+    if(isP&&ctx)s.oneshot=oneShot(s.type); sources.push(s); if(haveGL)makeSourceMesh(s); if(running)buildGraph(s); });
+  selId=sources[0]?sources[0].id:null; applyMode();
+  document.querySelectorAll('#modeSeg button').forEach(b=>b.classList.toggle('on',b.dataset.mode===mode));
+  renderList(); syncSel(); }
+
 /* ---- controls ---- */
 function $(id){return document.getElementById(id);}
 $('addBtn').onclick=()=>addSource($('addType').value);
@@ -629,6 +670,10 @@ $('motType').onchange=e=>{const s=sel();if(!s)return;s.mot.type=e.target.value;s
 $('motSpeed').oninput=e=>{const s=sel();if(!s)return;s.mot.speed=+e.target.value;setT('motSpeedVal',(+e.target.value).toFixed(2)+"×");};
 $('recBtn').onclick=()=>{const s=sel();if(!s)return;if(s.mot.recording)stopRec(s);else startRec(s);updateMotStatus();};
 $('loopBtn').onclick=()=>{const s=sel();if(!s)return;if(s.mot.rec.length>1){s.mot.type=(s.mot.type==="loop")?"none":"loop";s.mot.phase=0;}updateMotStatus();};
+$('revSend').oninput=e=>{const s=sel();if(!s)return;s.reverbSend=+e.target.value/100;setT('revSendVal',e.target.value+"%");};
+$('recwavBtn').onclick=toggleRec;
+$('saveBtn').onclick=saveScene;
+$('sceneIn').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{loadScene(JSON.parse(await f.text()));}catch(err){console.error(err);alert("Could not load scene: "+err.message);}};
 
 /* ---- boot ---- */
 initScene();
