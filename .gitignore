@@ -1,0 +1,17 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+# Large / local-only HRIR datasets (load these in-app instead of committing)
+*.sofa
+*.hdf5
+*.h5
+
+# Build / temp
+node_modules/
+dist/
+*.log
